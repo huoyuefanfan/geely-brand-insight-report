@@ -566,9 +566,15 @@
     .competitor-row .cr-stats { flex-basis: 100%; order: 3; }
     .competitor-row .cr-dims { flex-basis: 100%; order: 4; white-space: normal; }
     /* 散点图/竞品散点图固定440px/300px高，手机窄屏下比例失调(又窄又高)，
-       降低高度让气泡分布看起来没那么局促——用!important覆盖HTML里的内联style */
-    #chart-wrap-scatter, #chart-wrap-dim-scatter, #chart-wrap-subtopic-scatter { height: 320px !important; }
-    #chart-wrap-competitor-scatter { height: 260px !important; }
+       降低高度让气泡分布看起来没那么局促——用!important覆盖HTML里的内联style。
+       高度加在.chart-canvas-holder(canvas的直接父级)上，不加在.chart-box(外层，
+       还装着.bubble-legend)上——原来两者是同一个div、共用一个写死的height，
+       手机端.bubble-legend从absolute改成static后要占自己的文档流高度，外层
+       还是写死高度的话legend会被顶出box、跟下一个板块的标题重叠/紧贴在一起，
+       没有间隔。现在外层.chart-box没有固定高度，会跟着canvas-holder+legend
+       两块内容自然撑高，下面的板块自然就有正确的间距了 */
+    #chart-wrap-scatter .chart-canvas-holder, #chart-wrap-dim-scatter .chart-canvas-holder, #chart-wrap-subtopic-scatter .chart-canvas-holder { height: 320px !important; }
+    #chart-wrap-competitor-scatter .chart-canvas-holder { height: 260px !important; }
     /* 说明性文字(insight-note)在手机上很占竖向空间——用户反馈"很多文字说明
        解释也显得很占版面，可以精简和删除"。不逐条手动删(改动面太大，还容易
        删掉有用信息)，统一用line-clamp截到2行+省略号，超出部分不再占版面；
@@ -752,9 +758,9 @@
         <span class="chip concern" data-idx="0"><i></i>顾虑/减分项</span>
         <span class="chip positive" data-idx="1"><i></i>认可/加分项</span>
       </div>
-      <div class="chart-box" id="chart-wrap-dim-scatter" style="height:440px;display:none"><canvas id="chart-dim-scatter"></canvas></div>
-      <div class="chart-box" id="chart-wrap-scatter" style="height:440px"><canvas id="chart-scatter"></canvas></div>
-      <div class="chart-box" id="chart-wrap-subtopic-scatter" style="height:440px;display:none"><canvas id="chart-subtopic-scatter"></canvas></div>
+      <div class="chart-box" id="chart-wrap-dim-scatter" style="display:none"><div class="chart-canvas-holder" style="height:440px"><canvas id="chart-dim-scatter"></canvas></div></div>
+      <div class="chart-box" id="chart-wrap-scatter"><div class="chart-canvas-holder" style="height:440px"><canvas id="chart-scatter"></canvas></div></div>
+      <div class="chart-box" id="chart-wrap-subtopic-scatter" style="display:none"><div class="chart-canvas-holder" style="height:440px"><canvas id="chart-subtopic-scatter"></canvas></div></div>
     </div>
         <div class="section">
       <h2>竞品分析</h2>
@@ -766,7 +772,7 @@
         </div>
       </div>
       <div class="insight-note">横轴=提及次数，纵轴=总点赞数（均为对数轴），气泡大小=平均点赞。竞品品牌一多容易挤在一起分不清，默认只画提及最多的15个；可切到前25或全部。点击气泡可下钻查看该竞品品牌的具体评论。</div>
-      <div class="chart-box" id="chart-wrap-competitor-scatter" style="height:300px"><canvas id="chart-competitor-scatter"></canvas></div>
+      <div class="chart-box" id="chart-wrap-competitor-scatter"><div class="chart-canvas-holder" style="height:300px"><canvas id="chart-competitor-scatter"></canvas></div></div>
       <div class="competitor-subhead">① 购买对比品牌</div>
       <div id="competitorBuyList" class="competitor-list"></div>
       <div class="competitor-subhead">② 议论对比品牌（非购买对比）</div>
@@ -1904,16 +1910,31 @@ function renderSignalScatter(canvasId, wrapId, signalAgg, dimPrefix) {
       c.save();
       c.font = "10px \"PingFang SC\",\"Microsoft YaHei\",sans-serif";
       c.fillStyle = "#8A9099";
+      // 标签防重叠：气泡越大(声量越高)标签优先级越高，先画；画之前检查这条标签
+      // 的包围盒是否跟已经画出的标签重叠，重叠就跳过不画——气泡本体(Chart.js
+      // 自己画的圆)不受影响，只是这一颗没有文字标注，点击/hover下钻依然正常。
+      // 手机窄屏下条目一密集，靠这个自然让位，不用再单独调节显示数量
+      const items = [];
       [chart.getDatasetMeta(0), chart.getDatasetMeta(1)].forEach((meta, dsIdx) => {
         const keys = dsIdx === 0 ? concernKeys : positiveKeys;
+        const pts = dsIdx === 0 ? concernPoints : positivePoints;
         meta.data.forEach((point, i) => {
-          const label = prettyLabel(keys[i]);
-          const short = label.length > 7 ? label.slice(0, 7) + "…" : label;
-          // 靠近图表右边缘的气泡，标签往左边画，不然文字会被裁掉显示不全
-          const nearRight = point.x > rightEdge - 60;
-          c.textAlign = nearRight ? "right" : "left";
-          c.fillText(short, point.x + (nearRight ? -8 : 8), point.y + 3);
+          items.push({ x: point.x, y: point.y, r: pts[i].r, label: prettyLabel(keys[i]) });
         });
+      });
+      items.sort((a, b) => b.r - a.r);
+      const drawn = [];
+      items.forEach(({ x, y, label }) => {
+        const short = label.length > 7 ? label.slice(0, 7) + "…" : label;
+        // 靠近图表右边缘的气泡，标签往左边画，不然文字会被裁掉显示不全
+        const nearRight = x > rightEdge - 60;
+        const w = c.measureText(short).width;
+        const box = { x: nearRight ? x - 8 - w : x + 8, y: y - 5, w, h: 12 };
+        const hit = drawn.some(b => box.x < b.x + b.w && box.x + box.w > b.x && box.y < b.y + b.h && box.y + box.h > b.y);
+        if (hit) return;
+        drawn.push(box);
+        c.textAlign = nearRight ? "right" : "left";
+        c.fillText(short, x + (nearRight ? -8 : 8), y + 3);
       });
       c.textAlign = "left";
       c.restore();
@@ -2088,13 +2109,23 @@ function renderCompetitorScatter(rollup) {
       c.save();
       c.font = "10px \"PingFang SC\",\"Microsoft YaHei\",sans-serif";
       c.fillStyle = "#8A9099";
-      meta.data.forEach((point, i) => {
-        const label = points[i].name;
+      // 标签防重叠，逻辑跟分布地图的bubbleLabelPlugin一致：气泡越大标签优先级
+      // 越高，先画；重叠就跳过不画，气泡本体不受影响，点击/hover下钻依然正常。
+      // 手机窄屏下前15个竞品的标签靠这个自然让位，不用再单独限流
+      const items = meta.data.map((point, i) => ({ x: point.x, y: point.y, r: points[i].r, label: points[i].name }));
+      items.sort((a, b) => b.r - a.r);
+      const drawn = [];
+      items.forEach(({ x, y, label }) => {
         const short = label.length > 7 ? label.slice(0, 7) + "…" : label;
         // 靠近图表右边缘的气泡，标签往左边画，不然文字会被裁掉显示不全
-        const nearRight = point.x > rightEdge - 60;
+        const nearRight = x > rightEdge - 60;
+        const w = c.measureText(short).width;
+        const box = { x: nearRight ? x - 8 - w : x + 8, y: y - 5, w, h: 12 };
+        const hit = drawn.some(b => box.x < b.x + b.w && box.x + box.w > b.x && box.y < b.y + b.h && box.y + box.h > b.y);
+        if (hit) return;
+        drawn.push(box);
         c.textAlign = nearRight ? "right" : "left";
-        c.fillText(short, point.x + (nearRight ? -8 : 8), point.y + 3);
+        c.fillText(short, x + (nearRight ? -8 : 8), y + 3);
       });
       c.textAlign = "left";
       c.restore();
